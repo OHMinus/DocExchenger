@@ -5,6 +5,8 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Markdig;
+using Markdig.Syntax;
+using Markdig.Extensions.Yaml;
 using PuppeteerSharp;
 using PuppeteerSharp.Media;
 
@@ -55,6 +57,14 @@ namespace ObsidianToPdf
             BuildFileMap();
 
             var mdFiles = Directory.GetFiles(_root, "*.md", SearchOption.AllDirectories);
+
+            // Check for .base files (requested by user, but format unknown/link invalid)
+            var baseFiles = Directory.GetFiles(_root, "*.base", SearchOption.AllDirectories);
+            if (baseFiles.Length > 0)
+            {
+                Console.WriteLine($"Warning: Found {baseFiles.Length} .base files, but the format specification could not be resolved. Skipping.");
+            }
+
             var htmlBuilder = new System.Text.StringBuilder();
 
             // Basic CSS for printing
@@ -66,6 +76,8 @@ namespace ObsidianToPdf
             htmlBuilder.Append("table { border-collapse: collapse; width: 100%; margin-bottom: 20px; } ");
             htmlBuilder.Append("th, td { border: 1px solid #ddd; padding: 8px; text-align: left; } ");
             htmlBuilder.Append("th { background-color: #f2f2f2; } ");
+            htmlBuilder.Append(".yaml-metadata { width: auto; font-size: 0.9em; border: 1px solid #eee; background: #fafafa; } ");
+            htmlBuilder.Append(".yaml-metadata th { width: 150px; background: #eee; } ");
             htmlBuilder.Append(".note-section { margin-bottom: 40px; } ");
             htmlBuilder.Append(".page-break { page-break-after: always; } ");
             htmlBuilder.Append("</style></head><body>");
@@ -82,7 +94,10 @@ namespace ObsidianToPdf
 
             Console.WriteLine($"Processing {mdFiles.Length} Markdown files...");
 
-            var pipeline = new MarkdownPipelineBuilder().UseAdvancedExtensions().Build();
+            var pipeline = new MarkdownPipelineBuilder()
+                .UseAdvancedExtensions()
+                .UseYamlFrontMatter()
+                .Build();
 
             foreach (var mdFile in mdFiles)
             {
@@ -92,13 +107,27 @@ namespace ObsidianToPdf
                 // Pre-process Obsidian Links
                 string processedMarkdown = PreProcess(content);
 
-                string html = Markdown.ToHtml(processedMarkdown, pipeline);
+                var document = Markdown.Parse(processedMarkdown, pipeline);
+
+                // Extract YAML
+                string yamlTable = ExtractYamlAsHtmlTable(document);
+
+                // Render Markdown to HTML
+                var writer = new StringWriter();
+                var renderer = new Markdig.Renderers.HtmlRenderer(writer);
+                pipeline.Setup(renderer);
+                renderer.Render(document);
+                string html = writer.ToString();
+
                 string slug = GetSlug(fileName);
 
                 htmlBuilder.AppendLine($"<div id=\"{slug}\" class=\"note-section\">");
-                // Add a title for the note if it's not the first thing (optional, but good for context)
-                // htmlBuilder.AppendLine($"<h1>{fileName}</h1>");
-                // (Obsidian notes usually start with H1, so maybe skipping this to avoid double headers)
+
+                // Append YAML table if exists
+                if (!string.IsNullOrEmpty(yamlTable))
+                {
+                    htmlBuilder.AppendLine(yamlTable);
+                }
 
                 htmlBuilder.AppendLine(html);
                 htmlBuilder.AppendLine("</div>");
@@ -139,6 +168,39 @@ namespace ObsidianToPdf
             // Remove characters that might be problematic in HTML IDs
             slug = Regex.Replace(slug, @"[\[\]\(\)\""\'\#\<\>\&]", "");
             return slug;
+        }
+
+        private string ExtractYamlAsHtmlTable(MarkdownDocument document)
+        {
+            var yamlBlock = document.Descendants<YamlFrontMatterBlock>().FirstOrDefault();
+            if (yamlBlock == null)
+                return string.Empty;
+
+            var lines = yamlBlock.Lines;
+            if (lines.Count == 0)
+                return string.Empty;
+
+            var sb = new System.Text.StringBuilder();
+            sb.Append("<table class='yaml-metadata'><tbody>");
+
+            foreach (var line in lines)
+            {
+                var lineText = line.ToString();
+                if (string.IsNullOrWhiteSpace(lineText) || lineText.Trim() == "---")
+                    continue;
+
+                // Simple Key-Value parse
+                int colonIndex = lineText.IndexOf(':');
+                if (colonIndex > 0)
+                {
+                    string key = lineText.Substring(0, colonIndex).Trim();
+                    string value = lineText.Substring(colonIndex + 1).Trim();
+                    sb.Append($"<tr><th>{key}</th><td>{value}</td></tr>");
+                }
+            }
+
+            sb.Append("</tbody></table>");
+            return sb.ToString();
         }
 
         private string PreProcess(string markdown)
